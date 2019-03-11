@@ -27,7 +27,7 @@ type context struct {
 	modified map[*ast.File]bool
 }
 
-// goctxize path/to/pkg.Func [path/to/pkg.Arg]
+// goctxize path/to/pkg.Func [<pkg>...]
 func main() {
 	log.SetPrefix("goctxize: ")
 	log.SetFlags(log.Lshortfile)
@@ -95,35 +95,6 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: goctxize path/to/pkg[.Type].Func [path/to/pkg.Type]")
 	os.Exit(2)
 }
-
-/*
-func addContext(pkg *loader.PackageInfo, cursor *astutil.Cursor) bool {
-	if cursor.Name() != "Params" {
-		return true
-	}
-	if cursor.Index() != 0 {
-		return true
-	}
-	funcType, ok := cursor.Parent().(*ast.FuncType)
-	if !ok {
-		return true
-	}
-	pkg.Scopes[pkg.Files[0]].Lookup("n").
-	funcDecl := pkg.Defs[funcType.]
-
-	// cursor is pointing at first param
-
-	cursor.InsertBefore(&ast.Field{
-		Names: []*ast.Ident{
-			ast.NewIdent("ctx"),
-		},
-		Type: &ast.SelectorExpr{
-			Sel: ast.NewIdent("Context"),
-			X:   ast.NewIdent("context"),
-		},
-	})
-}
-*/
 
 type funcSpec struct {
 	pkgPath  string
@@ -262,14 +233,9 @@ func (c *context) rewriteCallers(spec funcSpec) error {
 				}
 
 				_, path, _ := prog.PathEnclosingInterval(id.Pos(), id.Pos())
-				initExpr, err := parser.ParseExpr("context.TODO()")
-				if err != nil {
-					return err
-				}
 
 				var decl *ast.FuncDecl
 				for _, node := range path {
-					log.Printf("%T", node)
 					var ok bool
 					decl, ok = node.(*ast.FuncDecl)
 					if ok {
@@ -279,6 +245,20 @@ func (c *context) rewriteCallers(spec funcSpec) error {
 
 				if decl == nil {
 					return errors.Errorf("%s: BUG: no surrounding FuncDecl found", c.Fset.Position(id.Pos()))
+				}
+
+				scope := pkg.Scopes[decl.Type]
+				if scope == nil {
+					return errors.Errorf("%s: BUG: no Scope found", c.Fset.Position(id.Pos()))
+				}
+
+				if scope.Lookup("ctx") != nil {
+					continue
+				}
+
+				initExpr, err := parser.ParseExpr("context.TODO()")
+				if err != nil {
+					return err
 				}
 
 				decl.Body.List = append(
@@ -339,58 +319,13 @@ func (c *context) rewriteFuncDecl(spec funcSpec) error {
 				break
 			}
 		}
-
-		/*
-			if id.Name != funcName {
-				continue
-			}
-
-			funcType, ok = obj.(*types.Func)
-			if !ok {
-				continue
-			}
-
-			_, path, _ := prog.PathEnclosingInterval(funcType.Pos(), funcType.Pos())
-			file = path[len(path)-1].(*ast.File)
-
-			for _, node := range path {
-				var ok bool
-				if funcDecl, ok = node.(*ast.FuncDecl); ok {
-					break
-				}
-			}
-			if funcDecl == nil {
-				continue
-			}
-
-			if funcDecl.Recv == nil {
-				// funcDecl is not a method declaration
-				if typeName == "" {
-					// given: <pkgPath>.<funcName>
-					break
-				}
-
-				continue
-			}
-
-			recvType := funcDecl.Recv.List[0].Type
-			if s, ok := recvType.(*ast.StarExpr); ok {
-				recvType = s.X
-			}
-
-			if types.ExprString(recvType) == typeName {
-				break
-			}
-
-			// log.Println(funcObj.Pkg().Path()) -> <pkgPtah>
-			// log.Println(pkg.Info.TypeOf(funcDecl.Recv.List[0].Type)) -> [*]<pkgPath>.<typeName>
-			// log.Println(types.ExprString(funcDecl.Recv.List[0].Type)) -> [*]<typeName>
-		*/
 	}
 
 	if funcDecl == nil {
 		return errors.Errorf("could not find declaration of func %s in package %s", spec.funcName, spec.pkgPath)
 	}
+
+	debugf("%s: found definition", prog.Fset.Position(funcDecl.Pos()))
 
 	funcDecl.Type.Params.List = append(
 		[]*ast.Field{
