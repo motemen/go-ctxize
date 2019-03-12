@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -25,24 +26,20 @@ import (
 
 var rxFuncSpec = regexp.MustCompile(`^(.+?)(?:\.([\pL_]+))?\.([\pL_]+)$`)
 
-const (
-	varName = "ctx"
-	varType = "context.Context"
-	varInit = "context.TODO()"
-)
-
 type varSpec struct {
-	name     string
-	pkgPath  string
-	pkgName  string
-	typeName string
-	initExpr string
+	name       string
+	pkgPath    string
+	pkgName    string
+	typeName   string
+	initExpr   string
+	varTypeObj types.Object
 }
 
 type context struct {
 	*loader.Program
 	modified map[*ast.File]bool
 	varSpec  varSpec
+	wd       string
 }
 
 func split2(s string, b byte) (string, string, bool) {
@@ -54,42 +51,55 @@ func split2(s string, b byte) (string, string, bool) {
 	return s[:p], s[p+1:], true
 }
 
-// goctxize [-var "ctx context.Context = context.TODO()"] path/to/pkg[.Type].Func [<pkg>...]
-func main() {
-	log.SetPrefix("goctxize: ")
-	log.SetFlags(log.Lshortfile)
-
-	varSpecString := flag.String("var", "ctx context.Context = context.TODO()", `inserted variable spec; must be in form of "<name> <path>.<type> = <expr>"`)
-	flag.Parse()
-
-	varNameType, varInit, ok := split2(*varSpecString, '=')
+func parseVarSpec(conf *loader.Config, s string) (varSpec, error) {
+	nameType, initExpr, ok := split2(s, '=')
 	if !ok {
-		log.Fatalf(`-var should in form of "<name> <path>.<type> = <expr>"`)
+		return varSpec{}, errors.New(`varSpec should in form of "<name> <path>.<type> = <expr>"`)
 	}
 
-	varName, varType, ok := split2(strings.TrimSpace(varNameType), ' ')
+	varName, varType, ok := split2(strings.TrimSpace(nameType), ' ')
 	if !ok {
-		log.Fatalf(`-var should in form of "<name> <path>.<type> = <expr>"`)
+		return varSpec{}, errors.New(`varSpec should in form of "<name> <path>.<type> = <expr>"`)
 	}
 
-	varTypePkgPath, varTypeName, ok := split2(varType, '.')
+	typePkgPath, varTypeName, ok := split2(varType, '.')
 	if !ok {
-		log.Fatalf("varType should be <path>.<name>: %s", varType)
+		return varSpec{}, errors.Errorf("varType should be <path>.<name>: %s", varType)
 	}
 
-	varTypePkg, err := build.Import(varTypePkgPath, "", build.ImportMode(0))
+	varTypePkg, err := build.Import(typePkgPath, "", build.ImportMode(0))
 	if err != nil {
-		log.Fatalf("could not load package: %s", varTypePkgPath)
+		return varSpec{}, errors.Errorf("could not load package: %s", typePkgPath)
 	}
 
 	varTypePkgName := varTypePkg.Name
 
-	conf := loader.Config{
+	return varSpec{
+		name:     varName,
+		pkgName:  varTypePkgName,
+		pkgPath:  typePkgPath,
+		typeName: varTypeName,
+		initExpr: initExpr,
+	}, nil
+}
+
+// goctxize [-var "ctx context.Context = context.TODO()"] path/to/pkg[.Type].Func [<pkg>...]
+func main() {
+	log.SetPrefix("goctxize: ")
+
+	varSpecString := flag.String("var", "ctx context.Context = context.TODO()", `inserted variable spec; must be in form of "<name> <path>.<type> = <expr>"`)
+	flag.Parse()
+
+	conf := &loader.Config{
 		TypeChecker: types.Config{},
+		Build:       &build.Default,
 		ParserMode:  parser.ParseComments,
 	}
 
-	var pkgPath, typeName, funcName string
+	varSpec, err := parseVarSpec(conf, *varSpecString)
+	if err != nil {
+		log.Fatalf("parsing -var: %s", err)
+	}
 
 	args := flag.Args()
 
@@ -98,29 +108,41 @@ func main() {
 		usage()
 	}
 
-	pkgPath, typeName, funcName = m[1], m[2], m[3]
+	pkgPath, typeName, funcName := m[1], m[2], m[3]
 
 	conf.ImportWithTests(pkgPath)
 	for _, path := range args[1:] {
 		conf.ImportWithTests(path)
 	}
 
+	conf.Import(varSpec.pkgPath)
+
 	prog, err := conf.Load()
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	bPkg, err := conf.Build.Import(varSpec.pkgPath, wd, build.ImportMode(0))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if pkg, ok := prog.Imported[bPkg.ImportPath]; ok {
+		obj := pkg.Pkg.Scope().Lookup(varSpec.typeName)
+		varSpec.varTypeObj = obj
 	}
 
 	spec := funcSpec{pkgPath: pkgPath, typeName: typeName, funcName: funcName}
 	c := context{
 		Program:  prog,
 		modified: map[*ast.File]bool{},
-		varSpec: varSpec{
-			name:     varName,
-			pkgName:  varTypePkgName,
-			pkgPath:  varTypePkgPath,
-			typeName: varTypeName,
-			initExpr: varInit,
-		},
+		varSpec:  varSpec,
+		wd:       wd,
 	}
 
 	err = c.rewriteFuncDecl(spec)
@@ -134,7 +156,7 @@ func main() {
 	}
 
 	for file := range c.modified {
-		filename := prog.Fset.Position(file.Pos()).Filename
+		filename := c.position(file.Pos()).Filename
 		debugf("rewriting %s", filename)
 
 		astutil.AddImport(prog.Fset, file, c.varSpec.pkgPath)
@@ -171,66 +193,14 @@ func (s funcSpec) String() string {
 	return fmt.Sprintf("%s.%s.%s", s.pkgPath, s.typeName, s.funcName)
 }
 
-func (s funcSpec) matchesDef(obj types.Object) bool {
-	// TODO: simply use types.Func.FullName()?
-
-	funcType, ok := obj.(*types.Func)
-	if !ok {
-		return false
+func (s funcSpec) matches(funcType *types.Func) bool {
+	recv := funcType.Type().(*types.Signature).Recv()
+	if recv != nil {
+		x := types.TypeString(recv.Type(), nil) + "." + funcType.Name()
+		return strings.TrimLeft(x, "*") == s.String()
 	}
 
-	funcSig := funcType.Type().(*types.Signature)
-
-	if s.typeName == "" {
-		if funcSig.Recv() != nil {
-			return false
-		}
-
-		return funcType.Pkg().Path() == s.pkgPath && funcType.Name() == s.funcName
-	}
-
-	if funcSig.Recv() == nil {
-		return false
-	}
-
-	recvType, ok := resolvePointerType(funcSig.Recv().Type()).(*types.Named)
-	if !ok {
-		return false
-	}
-
-	return recvType.Obj().Pkg().Path() == s.pkgPath && recvType.Obj().Name() == s.typeName && funcType.Name() == s.funcName
-}
-
-func (s funcSpec) matchesUse(x interface{}) bool {
-	if s.typeName == "" {
-		funcObj, ok := x.(*types.Func)
-		if !ok {
-			return false
-		}
-
-		if funcObj.Pkg() == nil {
-			return false
-		}
-
-		return funcObj.Pkg().Path() == s.pkgPath && funcObj.Name() == s.funcName
-	}
-
-	// use
-	sel, ok := x.(*types.Selection)
-	if !ok {
-		return false
-	}
-
-	recvType, ok := resolvePointerType(sel.Recv()).(*types.Named)
-	if !ok {
-		return false
-	}
-
-	if recvType.Obj().Pkg() == nil {
-		return false
-	}
-
-	return recvType.Obj().Pkg().Path() == s.pkgPath && recvType.Obj().Name() == s.typeName && sel.Obj().Name() == s.funcName
+	return funcType.Pkg().Path()+"."+funcType.Name() == s.String()
 }
 
 func resolvePointerType(typ types.Type) types.Type {
@@ -248,7 +218,13 @@ func debugf(format string, args ...interface{}) {
 	log.Printf("debug: "+format, args...)
 }
 
-func (c *context) rewriteCallExpr(node ast.Node) error {
+func (c *context) position(pos token.Pos) token.Position {
+	p := c.Program.Fset.Position(pos)
+	p.Filename, _ = filepath.Rel(c.wd, p.Filename)
+	return p
+}
+
+func (c *context) rewriteCallExpr(scope *types.Scope, node ast.Node) (usedExisting bool, err error) {
 	prog := c.Program
 
 	_, path, _ := prog.PathEnclosingInterval(node.Pos(), node.End())
@@ -263,14 +239,33 @@ func (c *context) rewriteCallExpr(node ast.Node) error {
 	}
 
 	if callExpr == nil {
-		return errors.Errorf("BUG: %s: could not find function call expression", prog.Fset.Position(node.Pos()))
+		err = errors.Errorf("BUG: %s: could not find function call expression", c.position(node.Pos()))
+		return
 	}
 
-	debugf("%s: found caller", prog.Fset.Position(node.Pos()))
+	debugf("%s: found caller", c.position(node.Pos()))
+
+	// if varType is an interface, use satisfying variable, if any
+
+	var varName string
+	if iface, ok := c.varSpec.varTypeObj.Type().Underlying().(*types.Interface); ok {
+		for _, name := range scope.Names() {
+			obj := scope.Lookup(name)
+			if types.Implements(obj.Type(), iface) {
+				varName = name
+				usedExisting = true
+				break
+			}
+		}
+	}
+
+	if varName == "" {
+		varName = c.varSpec.name
+	}
 
 	callExpr.Args = append(
 		[]ast.Expr{
-			ast.NewIdent(c.varSpec.name),
+			ast.NewIdent(varName),
 		},
 		callExpr.Args...,
 	)
@@ -278,10 +273,10 @@ func (c *context) rewriteCallExpr(node ast.Node) error {
 	file := path[len(path)-1].(*ast.File)
 	c.modified[file] = true
 
-	return nil
+	return
 }
 
-func (c *context) ensureVar(pkg *loader.PackageInfo, node ast.Node) error {
+func (c *context) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, node ast.Node) error {
 	prog := c.Program
 	_, path, _ := prog.PathEnclosingInterval(node.Pos(), node.End())
 
@@ -298,16 +293,11 @@ func (c *context) ensureVar(pkg *loader.PackageInfo, node ast.Node) error {
 		return errors.Errorf("%s: BUG: no surrounding FuncDecl found", c.Fset.Position(node.Pos()))
 	}
 
-	scope := pkg.Scopes[decl.Type]
-	if scope == nil {
-		return errors.Errorf("%s: BUG: no Scope found", c.Fset.Position(node.Pos()))
-	}
-
 	if scope.Lookup(c.varSpec.name) != nil {
 		return nil
 	}
 
-	scope.Insert(types.NewVar(token.NoPos, pkg.Pkg, c.varSpec.name, &types.Basic{ /*dummy*/ }))
+	scope.Insert(types.NewVar(token.NoPos, pkg.Pkg, c.varSpec.name, c.varSpec.varTypeObj.Type()))
 
 	initExpr, err := parser.ParseExpr(c.varSpec.initExpr)
 	if err != nil {
@@ -331,30 +321,51 @@ func (c *context) ensureVar(pkg *loader.PackageInfo, node ast.Node) error {
 	return nil
 }
 
+func (c *context) findScope(pkg *loader.PackageInfo, node ast.Node) (*types.Scope, error) {
+	prog := c.Program
+	_, path, _ := prog.PathEnclosingInterval(node.Pos(), node.Pos())
+
+	var decl *ast.FuncDecl
+	for _, node := range path {
+		var ok bool
+		decl, ok = node.(*ast.FuncDecl)
+		if ok {
+			break
+		}
+	}
+
+	if decl == nil {
+		return nil, errors.Errorf("%s: BUG: no surrounding FuncDecl found", c.Fset.Position(node.Pos()))
+	}
+
+	scope := pkg.Scopes[decl.Type]
+	if scope == nil {
+		return nil, errors.Errorf("%s: BUG: no Scope found", c.Fset.Position(node.Pos()))
+	}
+
+	return scope, nil
+}
+
 func (c *context) rewriteCallers(spec funcSpec) error {
 	prog := c.Program
 
 	for _, pkg := range prog.Imported {
 		for id, obj := range pkg.Uses {
-			if spec.matchesUse(obj) {
-				if err := c.rewriteCallExpr(id); err != nil {
+			if f, ok := obj.(*types.Func); ok && spec.matches(f) {
+				scope, err := c.findScope(pkg, id)
+				if err != nil {
 					return err
 				}
 
-				if err := c.ensureVar(pkg, id); err != nil {
-					return err
-				}
-			}
-		}
-
-		for expr, sel := range pkg.Selections {
-			if spec.matchesUse(sel) {
-				if err := c.rewriteCallExpr(expr); err != nil {
+				usedExisting, err := c.rewriteCallExpr(scope, id)
+				if err != nil {
 					return err
 				}
 
-				if err := c.ensureVar(pkg, expr); err != nil {
-					return err
+				if !usedExisting {
+					if err := c.ensureVar(pkg, scope, id); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -365,9 +376,6 @@ func (c *context) rewriteCallers(spec funcSpec) error {
 
 func (c *context) rewriteFuncDecl(spec funcSpec) error {
 	prog := c.Program
-
-	// XXX: how relative-path imports are resolved?
-	// eg. ./web -> github.com/motemen/go-xxx/web
 
 	pkg, ok := prog.Imported[spec.pkgPath]
 	if !ok {
@@ -380,17 +388,15 @@ func (c *context) rewriteFuncDecl(spec funcSpec) error {
 	)
 
 	for id, obj := range pkg.Info.Defs {
-		if !spec.matchesDef(obj) {
-			continue
-		}
+		if f, ok := obj.(*types.Func); ok && spec.matches(f) {
+			_, path, _ := prog.PathEnclosingInterval(id.Pos(), id.Pos())
+			file = path[len(path)-1].(*ast.File)
 
-		_, path, _ := prog.PathEnclosingInterval(id.Pos(), id.Pos())
-		file = path[len(path)-1].(*ast.File)
-
-		for _, node := range path {
-			var ok bool
-			if funcDecl, ok = node.(*ast.FuncDecl); ok {
-				break
+			for _, node := range path {
+				var ok bool
+				if funcDecl, ok = node.(*ast.FuncDecl); ok {
+					break
+				}
 			}
 		}
 	}
@@ -399,7 +405,7 @@ func (c *context) rewriteFuncDecl(spec funcSpec) error {
 		return errors.Errorf("could not find declaration of func %s in package %s", spec.funcName, spec.pkgPath)
 	}
 
-	debugf("%s: found definition", prog.Fset.Position(funcDecl.Pos()))
+	debugf("%s: found definition", c.position(funcDecl.Pos()))
 
 	funcDecl.Type.Params.List = append(
 		[]*ast.Field{
