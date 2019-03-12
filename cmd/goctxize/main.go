@@ -83,6 +83,15 @@ func parseVarSpec(conf *loader.Config, s string) (varSpec, error) {
 	}, nil
 }
 
+func resolvePkgPath(wd string, path string) (string, error) {
+	bPkg, err := build.Import(path, wd, build.ImportMode(0))
+	if err != nil {
+		return "", err
+	}
+
+	return bPkg.ImportPath, nil
+}
+
 // goctxize [-var "ctx context.Context = context.TODO()"] path/to/pkg[.Type].Func [<pkg>...]
 func main() {
 	log.SetPrefix("goctxize: ")
@@ -127,14 +136,19 @@ func main() {
 		log.Fatal(err)
 	}
 
-	bPkg, err := conf.Build.Import(varSpec.pkgPath, wd, build.ImportMode(0))
+	varPkgPath, err := resolvePkgPath(wd, varSpec.pkgPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if pkg, ok := prog.Imported[bPkg.ImportPath]; ok {
+	if pkg, ok := prog.Imported[varPkgPath]; ok {
 		obj := pkg.Pkg.Scope().Lookup(varSpec.typeName)
 		varSpec.varTypeObj = obj
+	}
+
+	pkgPath, err = resolvePkgPath(wd, pkgPath)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	spec := funcSpec{pkgPath: pkgPath, typeName: typeName, funcName: funcName}
@@ -167,7 +181,12 @@ func main() {
 			log.Fatal(err)
 		}
 
-		err = ioutil.WriteFile(filename, buf.Bytes(), 0777)
+		b, err := format.Source(buf.Bytes())
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		err = ioutil.WriteFile(filename, b, 0777)
 		if err != nil {
 			log.Fatalf("writing %s: %s", filename, err)
 		}
@@ -179,6 +198,7 @@ func usage() {
 	os.Exit(2)
 }
 
+// funcSpec is a specification of fully-qualified function or method.
 type funcSpec struct {
 	pkgPath  string
 	typeName string
@@ -193,6 +213,8 @@ func (s funcSpec) String() string {
 	return fmt.Sprintf("%s.%s.%s", s.pkgPath, s.typeName, s.funcName)
 }
 
+// matches take function object and checks if it matches to the specification.
+// For method cases, "pkg.Typ.Meth" matches either "func (pkg.Typ) Meth()" or "func (*pkg.Type) Meth()".
 func (s funcSpec) matches(funcType *types.Func) bool {
 	recv := funcType.Type().(*types.Signature).Recv()
 	if recv != nil {
@@ -219,15 +241,15 @@ func debugf(format string, args ...interface{}) {
 }
 
 func (c *context) position(pos token.Pos) token.Position {
-	p := c.Program.Fset.Position(pos)
+	p := c.Fset.Position(pos)
 	p.Filename, _ = filepath.Rel(c.wd, p.Filename)
 	return p
 }
 
-func (c *context) rewriteCallExpr(scope *types.Scope, node ast.Node) (usedExisting bool, err error) {
-	prog := c.Program
-
-	_, path, _ := prog.PathEnclosingInterval(node.Pos(), node.End())
+// rewriteCallExpr rewrites function call expression at pos to add ctx (or any other specified) to the first argument
+// This function examines scope if it already has any safisfying value according to ctx's type (eg. context.Context).
+func (c *context) rewriteCallExpr(scope *types.Scope, pos token.Pos) (usedExisting bool, err error) {
+	_, path, _ := c.PathEnclosingInterval(pos, pos)
 
 	var callExpr *ast.CallExpr
 	for _, node := range path {
@@ -239,11 +261,11 @@ func (c *context) rewriteCallExpr(scope *types.Scope, node ast.Node) (usedExisti
 	}
 
 	if callExpr == nil {
-		err = errors.Errorf("BUG: %s: could not find function call expression", c.position(node.Pos()))
+		err = errors.Errorf("BUG: %s: could not find function call expression", c.position(pos))
 		return
 	}
 
-	debugf("%s: found caller", c.position(node.Pos()))
+	debugf("%s: found caller", c.position(pos))
 
 	// if varType is an interface, use satisfying variable, if any
 
@@ -276,9 +298,9 @@ func (c *context) rewriteCallExpr(scope *types.Scope, node ast.Node) (usedExisti
 	return
 }
 
-func (c *context) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, node ast.Node) error {
-	prog := c.Program
-	_, path, _ := prog.PathEnclosingInterval(node.Pos(), node.End())
+// ensureVar adds variable declaration to the scope at pos
+func (c *context) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, pos token.Pos) error {
+	_, path, _ := c.PathEnclosingInterval(pos, pos)
 
 	var decl *ast.FuncDecl
 	for _, node := range path {
@@ -290,7 +312,7 @@ func (c *context) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, node as
 	}
 
 	if decl == nil {
-		return errors.Errorf("%s: BUG: no surrounding FuncDecl found", c.Fset.Position(node.Pos()))
+		return errors.Errorf("%s: BUG: no surrounding FuncDecl found", c.Fset.Position(pos))
 	}
 
 	if scope.Lookup(c.varSpec.name) != nil {
@@ -321,9 +343,8 @@ func (c *context) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, node as
 	return nil
 }
 
-func (c *context) findScope(pkg *loader.PackageInfo, node ast.Node) (*types.Scope, error) {
-	prog := c.Program
-	_, path, _ := prog.PathEnclosingInterval(node.Pos(), node.Pos())
+func (c *context) findScope(pkg *loader.PackageInfo, pos token.Pos) (*types.Scope, error) {
+	_, path, _ := c.PathEnclosingInterval(pos, pos)
 
 	var decl *ast.FuncDecl
 	for _, node := range path {
@@ -335,35 +356,33 @@ func (c *context) findScope(pkg *loader.PackageInfo, node ast.Node) (*types.Scop
 	}
 
 	if decl == nil {
-		return nil, errors.Errorf("%s: BUG: no surrounding FuncDecl found", c.Fset.Position(node.Pos()))
+		return nil, errors.Errorf("%s: BUG: no surrounding FuncDecl found", c.Fset.Position(pos))
 	}
 
 	scope := pkg.Scopes[decl.Type]
 	if scope == nil {
-		return nil, errors.Errorf("%s: BUG: no Scope found", c.Fset.Position(node.Pos()))
+		return nil, errors.Errorf("%s: BUG: no Scope found", c.Fset.Position(pos))
 	}
 
 	return scope, nil
 }
 
 func (c *context) rewriteCallers(spec funcSpec) error {
-	prog := c.Program
-
-	for _, pkg := range prog.Imported {
+	for _, pkg := range c.Imported {
 		for id, obj := range pkg.Uses {
 			if f, ok := obj.(*types.Func); ok && spec.matches(f) {
-				scope, err := c.findScope(pkg, id)
+				scope, err := c.findScope(pkg, id.Pos())
 				if err != nil {
 					return err
 				}
 
-				usedExisting, err := c.rewriteCallExpr(scope, id)
+				usedExisting, err := c.rewriteCallExpr(scope, id.Pos())
 				if err != nil {
 					return err
 				}
 
 				if !usedExisting {
-					if err := c.ensureVar(pkg, scope, id); err != nil {
+					if err := c.ensureVar(pkg, scope, id.Pos()); err != nil {
 						return err
 					}
 				}
@@ -374,10 +393,10 @@ func (c *context) rewriteCallers(spec funcSpec) error {
 	return nil
 }
 
+// rewriteFuncDecls finds function declaration matching spec and modifies AST
+// to make the function to have ctx (or any other specified) as the first argument.
 func (c *context) rewriteFuncDecl(spec funcSpec) error {
-	prog := c.Program
-
-	pkg, ok := prog.Imported[spec.pkgPath]
+	pkg, ok := c.Imported[spec.pkgPath]
 	if !ok {
 		return errors.Errorf("package %s was not found in source", spec.pkgPath)
 	}
@@ -389,7 +408,7 @@ func (c *context) rewriteFuncDecl(spec funcSpec) error {
 
 	for id, obj := range pkg.Info.Defs {
 		if f, ok := obj.(*types.Func); ok && spec.matches(f) {
-			_, path, _ := prog.PathEnclosingInterval(id.Pos(), id.Pos())
+			_, path, _ := c.PathEnclosingInterval(id.Pos(), id.Pos())
 			file = path[len(path)-1].(*ast.File)
 
 			for _, node := range path {
