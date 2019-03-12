@@ -51,45 +51,50 @@ func split2(s string, b byte) (string, string, bool) {
 	return s[:p], s[p+1:], true
 }
 
-func parseVarSpec(conf *loader.Config, s string) (varSpec, error) {
+func parseVarSpec(s string) (varSpec, error) {
 	nameType, initExpr, ok := split2(s, '=')
 	if !ok {
 		return varSpec{}, errors.New(`varSpec should in form of "<name> <path>.<type> = <expr>"`)
 	}
 
-	varName, varType, ok := split2(strings.TrimSpace(nameType), ' ')
+	name, typeName, ok := split2(strings.TrimSpace(nameType), ' ')
 	if !ok {
 		return varSpec{}, errors.New(`varSpec should in form of "<name> <path>.<type> = <expr>"`)
 	}
 
-	typePkgPath, varTypeName, ok := split2(varType, '.')
+	pkgPath, typeName, ok := split2(typeName, '.')
 	if !ok {
-		return varSpec{}, errors.Errorf("varType should be <path>.<name>: %s", varType)
+		return varSpec{}, errors.Errorf("varType should be <path>.<name>: %s", typeName)
 	}
 
-	varTypePkg, err := build.Import(typePkgPath, "", build.ImportMode(0))
+	pkgPath, pkgName, err := resolvePkgPath(pkgPath)
 	if err != nil {
-		return varSpec{}, errors.Errorf("could not load package: %s", typePkgPath)
+		return varSpec{}, err
 	}
-
-	varTypePkgName := varTypePkg.Name
 
 	return varSpec{
-		name:     varName,
-		pkgName:  varTypePkgName,
-		pkgPath:  typePkgPath,
-		typeName: varTypeName,
+		name:     name,
+		pkgName:  pkgName,
+		pkgPath:  pkgPath,
+		typeName: typeName,
 		initExpr: initExpr,
 	}, nil
 }
 
-func resolvePkgPath(wd string, path string) (string, error) {
-	bPkg, err := build.Import(path, wd, build.ImportMode(0))
+// resolvePkgPath resolve package path to full package path
+// eg. "./web" -> "path/to/pkg/web" or "github.com/pkg/path" -> "path/to/pkg/vendor/github.com/pkg/path"
+func resolvePkgPath(path string) (string, string, error) {
+	wd, err := os.Getwd()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	return bPkg.ImportPath, nil
+	bPkg, err := build.Import(path, wd, build.ImportMode(0))
+	if err != nil {
+		return "", "", err
+	}
+
+	return bPkg.ImportPath, bPkg.Name, nil
 }
 
 // goctxize [-var "ctx context.Context = context.TODO()"] path/to/pkg[.Type].Func [<pkg>...]
@@ -101,11 +106,10 @@ func main() {
 
 	conf := &loader.Config{
 		TypeChecker: types.Config{},
-		Build:       &build.Default,
 		ParserMode:  parser.ParseComments,
 	}
 
-	varSpec, err := parseVarSpec(conf, *varSpecString)
+	varSpec, err := parseVarSpec(*varSpecString)
 	if err != nil {
 		log.Fatalf("parsing -var: %s", err)
 	}
@@ -131,22 +135,22 @@ func main() {
 		log.Fatal(err)
 	}
 
-	wd, err := os.Getwd()
+	varPkgPath, _, err := resolvePkgPath(varSpec.pkgPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	varPkgPath, err := resolvePkgPath(wd, varSpec.pkgPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	if pkg, ok := prog.Imported[varPkgPath]; ok {
-		obj := pkg.Pkg.Scope().Lookup(varSpec.typeName)
-		varSpec.varTypeObj = obj
+		varSpec.varTypeObj = pkg.Pkg.Scope().Lookup(varSpec.typeName)
+	} else {
+		log.Fatalf("BUG: could not resolve package: %s", varSpec.pkgPath)
 	}
 
-	pkgPath, err = resolvePkgPath(wd, pkgPath)
+	pkgPath, _, err = resolvePkgPath(pkgPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	wd, err := os.Getwd()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -259,7 +263,6 @@ func (c *context) rewriteCallExpr(scope *types.Scope, pos token.Pos) (usedExisti
 			break
 		}
 	}
-
 	if callExpr == nil {
 		err = errors.Errorf("BUG: %s: could not find function call expression", c.position(pos))
 		return
@@ -292,29 +295,13 @@ func (c *context) rewriteCallExpr(scope *types.Scope, pos token.Pos) (usedExisti
 		callExpr.Args...,
 	)
 
-	file := path[len(path)-1].(*ast.File)
-	c.modified[file] = true
+	c.markModified(callExpr.Pos())
 
 	return
 }
 
 // ensureVar adds variable declaration to the scope at pos
-func (c *context) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, pos token.Pos) error {
-	_, path, _ := c.PathEnclosingInterval(pos, pos)
-
-	var decl *ast.FuncDecl
-	for _, node := range path {
-		var ok bool
-		decl, ok = node.(*ast.FuncDecl)
-		if ok {
-			break
-		}
-	}
-
-	if decl == nil {
-		return errors.Errorf("%s: BUG: no surrounding FuncDecl found", c.Fset.Position(pos))
-	}
-
+func (c *context) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, funcDecl *ast.FuncDecl, pos token.Pos) error {
 	if scope.Lookup(c.varSpec.name) != nil {
 		return nil
 	}
@@ -326,7 +313,7 @@ func (c *context) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, pos tok
 		return errors.Wrapf(err, "parsing %q", c.varSpec.initExpr)
 	}
 
-	decl.Body.List = append(
+	funcDecl.Body.List = append(
 		[]ast.Stmt{
 			&ast.AssignStmt{
 				Lhs: []ast.Expr{ast.NewIdent(c.varSpec.name)},
@@ -334,16 +321,15 @@ func (c *context) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, pos tok
 				Tok: token.DEFINE,
 			},
 		},
-		decl.Body.List...,
+		funcDecl.Body.List...,
 	)
 
-	file := path[len(path)-1].(*ast.File)
-	c.modified[file] = true
+	c.markModified(pos)
 
 	return nil
 }
 
-func (c *context) findScope(pkg *loader.PackageInfo, pos token.Pos) (*types.Scope, error) {
+func (c *context) findScope(pkg *loader.PackageInfo, pos token.Pos) (*types.Scope, *ast.FuncDecl, error) {
 	_, path, _ := c.PathEnclosingInterval(pos, pos)
 
 	var decl *ast.FuncDecl
@@ -354,24 +340,25 @@ func (c *context) findScope(pkg *loader.PackageInfo, pos token.Pos) (*types.Scop
 			break
 		}
 	}
-
 	if decl == nil {
-		return nil, errors.Errorf("%s: BUG: no surrounding FuncDecl found", c.Fset.Position(pos))
+		return nil, nil, errors.Errorf("%s: BUG: no surrounding FuncDecl found", c.Fset.Position(pos))
 	}
 
 	scope := pkg.Scopes[decl.Type]
 	if scope == nil {
-		return nil, errors.Errorf("%s: BUG: no Scope found", c.Fset.Position(pos))
+		return nil, nil, errors.Errorf("%s: BUG: no Scope found", c.Fset.Position(pos))
 	}
 
-	return scope, nil
+	return scope, decl, nil
 }
 
+// rewriteCallers rewrites calls to functions specified by spec
+// to add ctx as first argument.
 func (c *context) rewriteCallers(spec funcSpec) error {
 	for _, pkg := range c.Imported {
 		for id, obj := range pkg.Uses {
 			if f, ok := obj.(*types.Func); ok && spec.matches(f) {
-				scope, err := c.findScope(pkg, id.Pos())
+				scope, funcDecl, err := c.findScope(pkg, id.Pos())
 				if err != nil {
 					return err
 				}
@@ -382,7 +369,7 @@ func (c *context) rewriteCallers(spec funcSpec) error {
 				}
 
 				if !usedExisting {
-					if err := c.ensureVar(pkg, scope, id.Pos()); err != nil {
+					if err := c.ensureVar(pkg, scope, funcDecl, id.Pos()); err != nil {
 						return err
 					}
 				}
@@ -401,25 +388,17 @@ func (c *context) rewriteFuncDecl(spec funcSpec) error {
 		return errors.Errorf("package %s was not found in source", spec.pkgPath)
 	}
 
-	var (
-		funcDecl *ast.FuncDecl
-		file     *ast.File
-	)
-
+	var funcDecl *ast.FuncDecl
 	for id, obj := range pkg.Info.Defs {
 		if f, ok := obj.(*types.Func); ok && spec.matches(f) {
-			_, path, _ := c.PathEnclosingInterval(id.Pos(), id.Pos())
-			file = path[len(path)-1].(*ast.File)
-
-			for _, node := range path {
-				var ok bool
-				if funcDecl, ok = node.(*ast.FuncDecl); ok {
-					break
-				}
+			var err error
+			_, funcDecl, err = c.findScope(pkg, id.Pos())
+			if err != nil {
+				return err
 			}
+			break
 		}
 	}
-
 	if funcDecl == nil {
 		return errors.Errorf("could not find declaration of func %s in package %s", spec.funcName, spec.pkgPath)
 	}
@@ -441,7 +420,24 @@ func (c *context) rewriteFuncDecl(spec funcSpec) error {
 		funcDecl.Type.Params.List...,
 	)
 
-	c.modified[file] = true
+	c.markModified(funcDecl.Pos())
 
 	return nil
+}
+
+func (c *context) markModified(pos token.Pos) {
+	for _, pkg := range c.AllPackages {
+		for _, file := range pkg.Files {
+			if file.Pos() == token.NoPos {
+				continue
+			}
+			f := c.Fset.File(file.Pos())
+			if f.Base() <= int(pos) && int(pos) < f.Base()+f.Size() {
+				c.modified[file] = true
+				return
+			}
+		}
+	}
+
+	debugf("markModified: not found: %s", c.position(pos).Filename)
 }
