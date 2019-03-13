@@ -22,6 +22,8 @@ import (
 	"github.com/pkg/errors"
 )
 
+// VarSpec is a specification of the variable to be prepended to the arguments
+// of the func specified by FuncSpec.
 type VarSpec struct {
 	// name of the variable to insert eg. "ctx"
 	Name string
@@ -32,19 +34,23 @@ type VarSpec struct {
 	// initialization expression of the variable on the caller side
 	InitExpr string
 
+	// resolved package information pointed by PkgPath
 	pkg *build.Package
 
+	// type object of PkgPath.TypeName
 	varTypeObj types.Object
 }
 
+// App is an entry point of go-ctxize
 type App struct {
-	Config *loader.Config
+	Config *loader.Config // TODO: make private and implement Import() family in App
 	*loader.Program
 	modified map[*ast.File]bool
 	VarSpec  *VarSpec
 	Cwd      string
 }
 
+// Init prepares required objects and start loading packages given.
 func (app *App) Init() (err error) {
 	app.modified = map[*ast.File]bool{}
 
@@ -69,7 +75,7 @@ func (app *App) Init() (err error) {
 		return
 	}
 
-	bPkg, err := app.buildPackage(app.VarSpec.PkgPath)
+	bPkg, err := app.findPackage(app.VarSpec.PkgPath)
 	if err != nil {
 		return
 	}
@@ -80,7 +86,7 @@ func (app *App) Init() (err error) {
 		return
 	}
 
-	app.VarSpec.pkg, err = app.buildPackage(app.VarSpec.PkgPath)
+	app.VarSpec.pkg, err = app.findPackage(app.VarSpec.PkgPath)
 	if err != nil {
 		return
 	}
@@ -88,11 +94,11 @@ func (app *App) Init() (err error) {
 	return
 }
 
+// Each visits all files rewritten along with their contents.
 func (app *App) Each(callback func(filename string, content []byte) error) error {
 	fset := app.Program.Fset
 	for file := range app.modified {
 		filename := app.position(file.Pos()).Filename
-		debugf("rewriting %s", filename)
 
 		astutil.AddImport(fset, file, app.VarSpec.pkg.ImportPath)
 
@@ -118,6 +124,9 @@ func (app *App) Each(callback func(filename string, content []byte) error) error
 
 var rxVarSpec = regexp.MustCompile(`^([\pL_]+) +(\S+?)\.([\pL_]+) *= *(.+)$`)
 
+// ParseVarSpec parses var spec string.
+// Spec string must be "<name> <path>.<type> = <expr>",
+// eg. "ctx context.Context = context.TODO()"
 func ParseVarSpec(s string) (*VarSpec, error) {
 	m := rxVarSpec.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {
@@ -132,13 +141,24 @@ func ParseVarSpec(s string) (*VarSpec, error) {
 	}, nil
 }
 
-func (app *App) buildPackage(path string) (*build.Package, error) {
-	if app.Config.Build == nil {
-		app.Config.Build = &build.Default
+func (app *App) findPackage(path string) (*build.Package, error) {
+	buildContext := app.Config.Build
+	if buildContext == nil {
+		buildContext = &build.Default
 	}
-	return app.Config.Build.Import(path, app.Cwd, build.ImportMode(0))
+
+	findPackage := app.Config.FindPackage
+	if findPackage == nil {
+		findPackage = (*build.Context).Import
+	}
+
+	return findPackage(buildContext, path, app.Cwd, build.ImportMode(0))
 }
 
+// Rewrite visits all packages which are Import()ed to
+// prepend variable specified by VarSpec to functions and calls
+// specified by spec.
+// Before calling this method, Init() must be called.
 func (app *App) Rewrite(spec FuncSpec) error {
 	err := app.rewriteFuncDecl(spec)
 	if err != nil {
@@ -162,6 +182,8 @@ type FuncSpec struct {
 
 var rxFuncSpec = regexp.MustCompile(`^(.+?)(?:\.([\pL_]+))?\.([\pL_]+)$`)
 
+// ParseFuncSpec parses a string s to produce FuncSpec.
+// s must be in form of <pkg>[.<type>].<name>.
 func ParseFuncSpec(s string) (spec FuncSpec, err error) {
 	m := rxFuncSpec.FindStringSubmatch(s)
 	if m == nil {
@@ -181,7 +203,7 @@ func (s FuncSpec) String() string {
 	return fmt.Sprintf("%s.%s.%s", s.PkgPath, s.TypeName, s.FuncName)
 }
 
-// matches take function object and checks if it matches to the specification.
+// matches takes function object and checks if it matches to the specification.
 // For method cases, "pkg.Typ.Meth" matches either "func (pkg.Typ) Meth()" or "func (*pkg.Type) Meth()".
 func (s FuncSpec) matches(funcType *types.Func) bool {
 	recv := funcType.Type().(*types.Signature).Recv()
@@ -391,6 +413,10 @@ func (app *App) markModified(pos token.Pos) {
 	debugf("markModified: not found: %s", app.position(pos).Filename)
 }
 
+var Debug bool
+
 func debugf(format string, args ...interface{}) {
-	log.Printf("debug: "+format, args...)
+	if Debug {
+		log.Printf("debug: "+format, args...)
+	}
 }

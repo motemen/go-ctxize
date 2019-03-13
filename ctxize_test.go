@@ -12,26 +12,33 @@ import (
 	"golang.org/x/tools/go/loader"
 )
 
-func TestRewrite(t *testing.T) {
+func loaderConfig(t *testing.T) *loader.Config {
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	testdataContext := build.Default
-	testdataContext.GOPATH = filepath.Join(cwd, "testdata", "gopath")
+	buildContext := build.Default
+	buildContext.GOPATH = filepath.Join(cwd, "testdata", "gopath")
 
-	app := &App{
-		Config: &loader.Config{
-			Build: &testdataContext,
+	return &loader.Config{
+		Build: &buildContext,
+		FindPackage: func(ctxt *build.Context, importPath, fromDir string, mode build.ImportMode) (*build.Package, error) {
+			return ctxt.Import(importPath, fromDir, mode|build.IgnoreVendor)
 		},
+	}
+}
+
+func TestRewrite(t *testing.T) {
+	app := &App{
+		Config: loaderConfig(t),
 	}
 
 	app.Config.ImportWithTests("foo")
 	app.Config.ImportWithTests("bar")
 	app.Config.ImportWithTests("baz")
 
-	err = app.Init()
+	err := app.Init()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,18 +57,8 @@ func TestRewrite(t *testing.T) {
 	testFiles(t, app, expects)
 }
 func TestRewriteWithVarSpec(t *testing.T) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	testdataContext := build.Default
-	testdataContext.GOPATH = filepath.Join(cwd, "testdata", "gopath")
-
 	app := &App{
-		Config: &loader.Config{
-			Build: &testdataContext,
-		},
+		Config: loaderConfig(t),
 		VarSpec: &VarSpec{
 			Name:     "t",
 			PkgPath:  "go-qux",
@@ -72,7 +69,7 @@ func TestRewriteWithVarSpec(t *testing.T) {
 
 	app.Config.ImportWithTests("go-quux")
 
-	err = app.Init()
+	err := app.Init()
 	if err != nil {
 		t.Fatal(err)
 	}
