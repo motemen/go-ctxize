@@ -23,6 +23,10 @@ func main() {
 		"ctx context.Context = context.TODO()",
 		`inserted variable spec; must be in form of "<name> <path>.<type> = <expr>"`,
 	)
+	flag.Usage = func() {
+		fmt.Fprintln(flag.CommandLine.Output(), "usage: goctxize [flags] path/to/pkg[.Type].Func [<pkg>...]")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	varSpec, err := ctxize.ParseVarSpec(*varSpecString)
@@ -31,6 +35,11 @@ func main() {
 	}
 
 	args := flag.Args()
+
+	if len(args) == 0 {
+		flag.Usage()
+		os.Exit(2)
+	}
 
 	spec, err := ctxize.ParseFuncSpec(args[0])
 	if err != nil {
@@ -65,13 +74,4 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-}
-
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage: goctxize path/to/pkg[.Type].Func [<pkg>...]")
-	os.Exit(2)
-}
-
-func debugf(format string, args ...interface{}) {
-	log.Printf("debug: "+format, args...)
 }

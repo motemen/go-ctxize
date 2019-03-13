@@ -43,8 +43,8 @@ type VarSpec struct {
 
 // App is an entry point of go-ctxize
 type App struct {
-	Config *loader.Config // TODO: make private and implement Import() family in App
-	*loader.Program
+	Config   *loader.Config // TODO: make private and implement Import() family in App
+	Program  *loader.Program
 	modified map[*ast.File]bool
 	VarSpec  *VarSpec
 	Cwd      string
@@ -224,7 +224,7 @@ func (app *App) position(pos token.Pos) token.Position {
 // rewriteCallExpr rewrites function call expression at pos to add ctx (or any other specified) to the first argument
 // This function examines scope if it already has any safisfying value according to ctx's type (eg. context.Context).
 func (app *App) rewriteCallExpr(scope *types.Scope, pos token.Pos) (usedExisting bool, err error) {
-	_, path, _ := app.PathEnclosingInterval(pos, pos)
+	_, path, _ := app.Program.PathEnclosingInterval(pos, pos)
 
 	var callExpr *ast.CallExpr
 	for _, node := range path {
@@ -301,7 +301,7 @@ func (app *App) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, funcDecl 
 }
 
 func (app *App) findScope(pkg *loader.PackageInfo, pos token.Pos) (*types.Scope, *ast.FuncDecl, error) {
-	_, path, _ := app.PathEnclosingInterval(pos, pos)
+	_, path, _ := app.Program.PathEnclosingInterval(pos, pos)
 
 	var decl *ast.FuncDecl
 	for _, node := range path {
@@ -326,7 +326,7 @@ func (app *App) findScope(pkg *loader.PackageInfo, pos token.Pos) (*types.Scope,
 // rewriteCallers rewrites calls to functions specified by spec
 // to add ctx as first argument.
 func (app *App) rewriteCallers(spec FuncSpec) error {
-	for _, pkg := range app.Imported {
+	for _, pkg := range app.Program.Imported {
 		for id, obj := range pkg.Uses {
 			if f, ok := obj.(*types.Func); ok && spec.matches(f) {
 				scope, funcDecl, err := app.findScope(pkg, id.Pos())
@@ -354,7 +354,7 @@ func (app *App) rewriteCallers(spec FuncSpec) error {
 // rewriteFuncDecls finds function declaration matching spec and modifies AST
 // to make the function to have ctx (or any other specified) as the first argument.
 func (app *App) rewriteFuncDecl(spec FuncSpec) error {
-	pkg, ok := app.Imported[spec.PkgPath]
+	pkg, ok := app.Program.Imported[spec.PkgPath]
 	if !ok {
 		return errors.Errorf("package %s was not found in source", spec.PkgPath)
 	}
@@ -397,7 +397,7 @@ func (app *App) rewriteFuncDecl(spec FuncSpec) error {
 }
 
 func (app *App) markModified(pos token.Pos) {
-	for _, pkg := range app.AllPackages {
+	for _, pkg := range app.Program.AllPackages {
 		for _, file := range pkg.Files {
 			if file.Pos() == token.NoPos {
 				continue
