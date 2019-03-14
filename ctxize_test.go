@@ -1,30 +1,31 @@
 package ctxize
 
 import (
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
-	"go/build"
-
-	"golang.org/x/tools/go/loader"
+	"golang.org/x/tools/go/packages"
 )
 
-func loaderConfig(t *testing.T) *loader.Config {
+func loaderConfig(t *testing.T) *packages.Config {
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	buildContext := build.Default
-	buildContext.GOPATH = filepath.Join(cwd, "testdata", "gopath")
+	tmpdir, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	return &loader.Config{
-		Build: &buildContext,
-		FindPackage: func(ctxt *build.Context, importPath, fromDir string, mode build.ImportMode) (*build.Package, error) {
-			return ctxt.Import(importPath, fromDir, mode|build.IgnoreVendor)
+	return &packages.Config{
+		Env: []string{
+			"GOPATH=" + filepath.Join(cwd, "testdata", "gopath"),
+			"GOCACHE=" + tmpdir,
 		},
 	}
 }
@@ -34,11 +35,7 @@ func TestRewrite(t *testing.T) {
 		Config: loaderConfig(t),
 	}
 
-	app.Config.ImportWithTests("foo")
-	app.Config.ImportWithTests("bar")
-	app.Config.ImportWithTests("baz")
-
-	err := app.Init()
+	err := app.Init("foo", "bar", "baz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +64,7 @@ func TestRewriteWithVarSpec(t *testing.T) {
 		},
 	}
 
-	app.Config.ImportWithTests("go-quux")
-
-	err := app.Init()
+	err := app.Init("go-quux")
 	if err != nil {
 		t.Fatal(err)
 	}

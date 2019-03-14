@@ -7,10 +7,6 @@ import (
 	"log"
 	"os"
 
-	"go/parser"
-
-	"golang.org/x/tools/go/loader"
-
 	"github.com/motemen/go-ctxize"
 )
 
@@ -47,18 +43,10 @@ func main() {
 	}
 
 	app := ctxize.App{
-		Config: &loader.Config{
-			ParserMode: parser.ParseComments,
-		},
 		VarSpec: varSpec,
 	}
 
-	app.Config.ImportWithTests(spec.PkgPath)
-	for _, path := range args[1:] {
-		app.Config.ImportWithTests(path)
-	}
-
-	err = app.Init()
+	err = app.Init(append([]string{spec.PkgPath}, args[1:]...)...)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -10,14 +10,13 @@ import (
 	"strings"
 
 	"go/ast"
-	"go/build"
 	"go/format"
 	"go/parser"
 	"go/token"
 	"go/types"
 
 	"golang.org/x/tools/go/ast/astutil"
-	"golang.org/x/tools/go/loader"
+	"golang.org/x/tools/go/packages"
 
 	"github.com/pkg/errors"
 )
@@ -35,7 +34,7 @@ type VarSpec struct {
 	InitExpr string
 
 	// resolved package information pointed by PkgPath
-	pkg *build.Package
+	pkg *packages.Package
 
 	// type object of PkgPath.TypeName
 	varTypeObj types.Object
@@ -43,15 +42,27 @@ type VarSpec struct {
 
 // App is an entry point of go-ctxize
 type App struct {
-	Config   *loader.Config // TODO: make private and implement Import() family in App
-	Program  *loader.Program
-	modified map[*ast.File]bool
+	Config   *packages.Config
 	VarSpec  *VarSpec
 	Cwd      string
+	modified map[*ast.File]bool
+	pkgs     []*packages.Package
 }
 
 // Init prepares required objects and start loading packages given.
-func (app *App) Init() (err error) {
+func (app *App) Init(pkgPaths ...string) (err error) {
+	if app.Config == nil {
+		app.Config = &packages.Config{
+			Tests: true,
+		}
+	}
+
+	app.Config.Mode = packages.LoadAllSyntax
+
+	if app.Config.Fset == nil {
+		app.Config.Fset = token.NewFileSet()
+	}
+
 	app.modified = map[*ast.File]bool{}
 
 	app.Cwd, err = os.Getwd()
@@ -68,25 +79,30 @@ func (app *App) Init() (err error) {
 		}
 	}
 
-	app.Config.Import(app.VarSpec.PkgPath)
-
-	app.Program, err = app.Config.Load()
+	app.pkgs, err = packages.Load(app.Config, append([]string{app.VarSpec.PkgPath}, pkgPaths...)...)
 	if err != nil {
 		return
 	}
 
-	bPkg, err := app.findPackage(app.VarSpec.PkgPath)
+	var conf = *app.Config
+	conf.Mode = packages.LoadFiles
+
+	pp, err := packages.Load(&conf, app.VarSpec.PkgPath)
 	if err != nil {
 		return
 	}
-	if pkg, ok := app.Program.Imported[bPkg.ImportPath]; ok {
-		app.VarSpec.varTypeObj = pkg.Pkg.Scope().Lookup(app.VarSpec.TypeName)
-	} else {
-		err = errors.Errorf("BUG: could not resolve package: %s", app.VarSpec.PkgPath)
+	for _, pkg := range app.pkgs {
+		if pkg.ID == pp[0].ID {
+			app.VarSpec.varTypeObj = pkg.Types.Scope().Lookup(app.VarSpec.TypeName)
+			break
+		}
+	}
+	if app.VarSpec.varTypeObj == nil {
+		err = errors.Errorf("TODO")
 		return
 	}
 
-	app.VarSpec.pkg, err = app.findPackage(app.VarSpec.PkgPath)
+	app.VarSpec.pkg = pp[0]
 	if err != nil {
 		return
 	}
@@ -96,11 +112,11 @@ func (app *App) Init() (err error) {
 
 // Each visits all files rewritten along with their contents.
 func (app *App) Each(callback func(filename string, content []byte) error) error {
-	fset := app.Program.Fset
+	fset := app.Config.Fset
 	for file := range app.modified {
 		filename := app.position(file.Pos()).Filename
 
-		astutil.AddImport(fset, file, app.VarSpec.pkg.ImportPath)
+		astutil.AddImport(fset, file, app.VarSpec.pkg.PkgPath)
 
 		var buf bytes.Buffer
 		err := format.Node(&buf, fset, file)
@@ -141,6 +157,7 @@ func ParseVarSpec(s string) (*VarSpec, error) {
 	}, nil
 }
 
+/*
 func (app *App) findPackage(path string) (*build.Package, error) {
 	buildContext := app.Config.Build
 	if buildContext == nil {
@@ -154,6 +171,7 @@ func (app *App) findPackage(path string) (*build.Package, error) {
 
 	return findPackage(buildContext, path, app.Cwd, build.ImportMode(0))
 }
+*/
 
 // Rewrite visits all packages which are Import()ed to
 // prepend variable specified by VarSpec to functions and calls
@@ -216,15 +234,28 @@ func (s FuncSpec) matches(funcType *types.Func) bool {
 }
 
 func (app *App) position(pos token.Pos) token.Position {
-	p := app.Program.Fset.Position(pos)
+	p := app.Config.Fset.Position(pos)
 	p.Filename, _ = filepath.Rel(app.Cwd, p.Filename)
 	return p
+}
+
+func (app *App) pathEnclosingInterval(start, end token.Pos) ([]ast.Node, bool) {
+	for _, pkg := range app.pkgs {
+		for _, file := range pkg.Syntax {
+			f := app.Config.Fset.File(file.Pos())
+			if f.Base() <= int(start) && int(start) < f.Base()+f.Size() {
+				return astutil.PathEnclosingInterval(file, start, end)
+			}
+		}
+	}
+
+	return nil, false
 }
 
 // rewriteCallExpr rewrites function call expression at pos to add ctx (or any other specified) to the first argument
 // This function examines scope if it already has any safisfying value according to ctx's type (eg. context.Context).
 func (app *App) rewriteCallExpr(scope *types.Scope, pos token.Pos) (usedExisting bool, err error) {
-	_, path, _ := app.Program.PathEnclosingInterval(pos, pos)
+	path, _ := app.pathEnclosingInterval(pos, pos)
 
 	var callExpr *ast.CallExpr
 	for _, node := range path {
@@ -272,12 +303,12 @@ func (app *App) rewriteCallExpr(scope *types.Scope, pos token.Pos) (usedExisting
 }
 
 // ensureVar adds variable declaration to the scope at pos
-func (app *App) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, funcDecl *ast.FuncDecl, pos token.Pos) error {
+func (app *App) ensureVar(pkg *packages.Package, scope *types.Scope, funcDecl *ast.FuncDecl, pos token.Pos) error {
 	if scope.Lookup(app.VarSpec.Name) != nil {
 		return nil
 	}
 
-	scope.Insert(types.NewVar(token.NoPos, pkg.Pkg, app.VarSpec.Name, app.VarSpec.varTypeObj.Type()))
+	scope.Insert(types.NewVar(token.NoPos, pkg.Types, app.VarSpec.Name, app.VarSpec.varTypeObj.Type()))
 
 	initExpr, err := parser.ParseExpr(app.VarSpec.InitExpr)
 	if err != nil {
@@ -300,8 +331,8 @@ func (app *App) ensureVar(pkg *loader.PackageInfo, scope *types.Scope, funcDecl 
 	return nil
 }
 
-func (app *App) findScope(pkg *loader.PackageInfo, pos token.Pos) (*types.Scope, *ast.FuncDecl, error) {
-	_, path, _ := app.Program.PathEnclosingInterval(pos, pos)
+func (app *App) findScope(pkg *packages.Package, pos token.Pos) (*types.Scope, *ast.FuncDecl, error) {
+	path, _ := app.pathEnclosingInterval(pos, pos)
 
 	var decl *ast.FuncDecl
 	for _, node := range path {
@@ -312,12 +343,12 @@ func (app *App) findScope(pkg *loader.PackageInfo, pos token.Pos) (*types.Scope,
 		}
 	}
 	if decl == nil {
-		return nil, nil, errors.Errorf("%s: BUG: no surrounding FuncDecl found", app.Program.Fset.Position(pos))
+		return nil, nil, errors.Errorf("%s: BUG: no surrounding FuncDecl found", app.Config.Fset.Position(pos))
 	}
 
-	scope := pkg.Scopes[decl.Type]
+	scope := pkg.TypesInfo.Scopes[decl.Type]
 	if scope == nil {
-		return nil, nil, errors.Errorf("%s: BUG: no Scope found", app.Program.Fset.Position(pos))
+		return nil, nil, errors.Errorf("%s: BUG: no Scope found", app.Config.Fset.Position(pos))
 	}
 
 	return scope, decl, nil
@@ -326,8 +357,8 @@ func (app *App) findScope(pkg *loader.PackageInfo, pos token.Pos) (*types.Scope,
 // rewriteCallers rewrites calls to functions specified by spec
 // to add ctx as first argument.
 func (app *App) rewriteCallers(spec FuncSpec) error {
-	for _, pkg := range app.Program.Imported {
-		for id, obj := range pkg.Uses {
+	for _, pkg := range app.pkgs {
+		for id, obj := range pkg.TypesInfo.Uses {
 			if f, ok := obj.(*types.Func); ok && spec.matches(f) {
 				scope, funcDecl, err := app.findScope(pkg, id.Pos())
 				if err != nil {
@@ -354,13 +385,19 @@ func (app *App) rewriteCallers(spec FuncSpec) error {
 // rewriteFuncDecls finds function declaration matching spec and modifies AST
 // to make the function to have ctx (or any other specified) as the first argument.
 func (app *App) rewriteFuncDecl(spec FuncSpec) error {
-	pkg, ok := app.Program.Imported[spec.PkgPath]
-	if !ok {
+	var pkg *packages.Package
+	for _, p := range app.pkgs {
+		if p.PkgPath == spec.PkgPath {
+			pkg = p
+			break
+		}
+	}
+	if pkg == nil {
 		return errors.Errorf("package %s was not found in source", spec.PkgPath)
 	}
 
 	var funcDecl *ast.FuncDecl
-	for id, obj := range pkg.Info.Defs {
+	for id, obj := range pkg.TypesInfo.Defs {
 		if f, ok := obj.(*types.Func); ok && spec.matches(f) {
 			var err error
 			_, funcDecl, err = app.findScope(pkg, id.Pos())
@@ -397,12 +434,12 @@ func (app *App) rewriteFuncDecl(spec FuncSpec) error {
 }
 
 func (app *App) markModified(pos token.Pos) {
-	for _, pkg := range app.Program.AllPackages {
-		for _, file := range pkg.Files {
+	for _, pkg := range app.pkgs {
+		for _, file := range pkg.Syntax {
 			if file.Pos() == token.NoPos {
 				continue
 			}
-			f := app.Program.Fset.File(file.Pos())
+			f := app.Config.Fset.File(file.Pos())
 			if f.Base() <= int(pos) && int(pos) < f.Base()+f.Size() {
 				app.modified[file] = true
 				return
@@ -413,7 +450,7 @@ func (app *App) markModified(pos token.Pos) {
 	debugf("markModified: not found: %s", app.position(pos).Filename)
 }
 
-var Debug bool
+var Debug bool = true
 
 func debugf(format string, args ...interface{}) {
 	if Debug {
