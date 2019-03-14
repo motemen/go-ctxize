@@ -1,38 +1,37 @@
 package ctxize
 
 import (
-	"io/ioutil"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
-	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/packages/packagestest"
 )
 
-func loaderConfig(t *testing.T) *packages.Config {
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tmpdir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return &packages.Config{
-		Env: []string{
-			"GOPATH=" + filepath.Join(cwd, "testdata", "gopath"),
-			"GOCACHE=" + tmpdir,
-		},
-	}
-}
+var testdata = []packagestest.Module{{
+	Name:  "foo",
+	Files: packagestest.MustCopyFileTree("testdata/gopath/src/foo"),
+}, {
+	Name:  "bar",
+	Files: packagestest.MustCopyFileTree("testdata/gopath/src/bar"),
+}, {
+	Name:  "baz",
+	Files: packagestest.MustCopyFileTree("testdata/gopath/src/baz"),
+}, {
+	Name:  "go-qux",
+	Files: packagestest.MustCopyFileTree("testdata/gopath/src/go-qux"),
+}, {
+	Name:  "go-quux",
+	Files: packagestest.MustCopyFileTree("testdata/gopath/src/go-quux"),
+}}
 
 func TestRewrite(t *testing.T) {
+	exported := packagestest.Export(t, packagestest.GOPATH, testdata)
+	defer exported.Cleanup()
+
 	app := &App{
-		Config: loaderConfig(t),
+		Config: exported.Config,
 	}
 
 	err := app.Init("foo", "bar", "baz")
@@ -51,11 +50,15 @@ func TestRewrite(t *testing.T) {
 		"baz.go":      {"foo.F(x)"},
 		"foo_test.go": {"F(ctx)"},
 	}
-	testFiles(t, app, expects)
+	testFileContents(t, app, expects)
 }
+
 func TestRewriteWithVarSpec(t *testing.T) {
+	exported := packagestest.Export(t, packagestest.GOPATH, testdata)
+	defer exported.Cleanup()
+
 	app := &App{
-		Config: loaderConfig(t),
+		Config: exported.Config,
 		VarSpec: &VarSpec{
 			Name:     "t",
 			PkgPath:  "go-qux",
@@ -81,10 +84,10 @@ func TestRewriteWithVarSpec(t *testing.T) {
 			"t := 0",
 		},
 	}
-	testFiles(t, app, expects)
+	testFileContents(t, app, expects)
 }
 
-func testFiles(t *testing.T, app *App, expects map[string][]string) {
+func testFileContents(t *testing.T, app *App, expects map[string][]string) {
 	err := app.Each(func(filename string, content []byte) error {
 		t.Log(filename, string(content))
 		name := filepath.Base(filename)
