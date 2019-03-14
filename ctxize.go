@@ -84,30 +84,37 @@ func (app *App) Init(pkgPaths ...string) (err error) {
 		return
 	}
 
-	var conf = *app.Config
-	conf.Mode = packages.LoadFiles
-
-	pp, err := packages.Load(&conf, app.VarSpec.PkgPath)
+	varPkg, err := app.resolvePackage(app.VarSpec.PkgPath)
 	if err != nil {
 		return
 	}
-	for _, pkg := range app.pkgs {
-		if pkg.ID == pp[0].ID {
-			app.VarSpec.varTypeObj = pkg.Types.Scope().Lookup(app.VarSpec.TypeName)
-			break
-		}
-	}
+
+	app.VarSpec.pkg = varPkg
+	app.VarSpec.varTypeObj = varPkg.Types.Scope().Lookup(app.VarSpec.TypeName)
 	if app.VarSpec.varTypeObj == nil {
-		err = errors.Errorf("TODO")
-		return
-	}
-
-	app.VarSpec.pkg = pp[0]
-	if err != nil {
+		err = errors.Errorf("cannot find type %s in package %s", app.VarSpec.TypeName, varPkg.PkgPath)
 		return
 	}
 
 	return
+}
+
+func (app *App) resolvePackage(path string) (*packages.Package, error) {
+	var conf = *app.Config // copy
+	conf.Mode = packages.LoadFiles
+	conf.Tests = false
+
+	pp, err := packages.Load(&conf, path)
+	if err != nil {
+		return nil, err
+	}
+	for _, pkg := range app.pkgs {
+		if pkg.ID == pp[0].ID {
+			return pkg, nil
+		}
+	}
+
+	return nil, errors.Errorf("cannot resolve package %q", path)
 }
 
 // Each visits all files rewritten along with their contents.
@@ -178,7 +185,13 @@ func (app *App) findPackage(path string) (*build.Package, error) {
 // specified by spec.
 // Before calling this method, Init() must be called.
 func (app *App) Rewrite(spec FuncSpec) error {
-	err := app.rewriteFuncDecl(spec)
+	var err error
+	spec.pkg, err = app.resolvePackage(spec.PkgPath)
+	if err != nil {
+		return err
+	}
+
+	err = app.rewriteFuncDecl(spec)
 	if err != nil {
 		return err
 	}
@@ -196,6 +209,9 @@ type FuncSpec struct {
 	PkgPath  string
 	TypeName string
 	FuncName string
+
+	// resolved package information pointed by PkgPath
+	pkg *packages.Package
 }
 
 var rxFuncSpec = regexp.MustCompile(`^(.+?)(?:\.([\pL_]+))?\.([\pL_]+)$`)
@@ -215,10 +231,10 @@ func ParseFuncSpec(s string) (spec FuncSpec, err error) {
 
 func (s FuncSpec) String() string {
 	if s.TypeName == "" {
-		return fmt.Sprintf("%s.%s", s.PkgPath, s.FuncName)
+		return fmt.Sprintf("%s.%s", s.pkg.PkgPath, s.FuncName)
 	}
 
-	return fmt.Sprintf("%s.%s.%s", s.PkgPath, s.TypeName, s.FuncName)
+	return fmt.Sprintf("%s.%s.%s", s.pkg.PkgPath, s.TypeName, s.FuncName)
 }
 
 // matches takes function object and checks if it matches to the specification.
@@ -385,22 +401,11 @@ func (app *App) rewriteCallers(spec FuncSpec) error {
 // rewriteFuncDecls finds function declaration matching spec and modifies AST
 // to make the function to have ctx (or any other specified) as the first argument.
 func (app *App) rewriteFuncDecl(spec FuncSpec) error {
-	var pkg *packages.Package
-	for _, p := range app.pkgs {
-		if p.PkgPath == spec.PkgPath {
-			pkg = p
-			break
-		}
-	}
-	if pkg == nil {
-		return errors.Errorf("package %s was not found in source", spec.PkgPath)
-	}
-
 	var funcDecl *ast.FuncDecl
-	for id, obj := range pkg.TypesInfo.Defs {
+	for id, obj := range spec.pkg.TypesInfo.Defs {
 		if f, ok := obj.(*types.Func); ok && spec.matches(f) {
 			var err error
-			_, funcDecl, err = app.findScope(pkg, id.Pos())
+			_, funcDecl, err = app.findScope(spec.pkg, id.Pos())
 			if err != nil {
 				return err
 			}
