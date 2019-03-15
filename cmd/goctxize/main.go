@@ -46,7 +46,7 @@ func main() {
 		VarSpec: varSpec,
 	}
 
-	err = app.Init(append([]string{spec.PkgPath}, args[1:]...)...)
+	err = app.Load(append([]string{spec.PkgPath}, args[1:]...)...)
 	if err != nil {
 		log.Fatal(err)
 	}

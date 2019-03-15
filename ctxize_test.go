@@ -34,7 +34,7 @@ func TestRewrite(t *testing.T) {
 		Config: exported.Config,
 	}
 
-	err := app.Init("foo", "bar", "baz")
+	err := app.Load("foo", "bar", "baz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestRewriteWithVarSpec(t *testing.T) {
 		},
 	}
 
-	err := app.Init("go-quux")
+	err := app.Load("go-quux")
 	if err != nil {
 		t.Fatal(err)
 	}
