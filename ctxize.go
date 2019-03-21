@@ -414,9 +414,55 @@ func (app *App) rewriteFuncDecl(spec FuncSpec) error {
 		funcDecl.Type.Params.List...,
 	)
 
+	app.removeStubVarDecl(spec.pkg.TypesInfo, funcDecl)
+
 	app.markModified(funcDecl.Pos())
 
 	return nil
+}
+
+func (app *App) removeStubVarDecl(typesInfo *types.Info, funcDecl *ast.FuncDecl) {
+	// Special but common case: if the type of variable inserted is
+	// "context.Context" and there is a definition of variable of same name which
+	// is initialized by "<var> := context.TODO()" inside function declaration, remove that
+	// definition in favour of newly added ctx argument.
+	if app.VarSpec.PkgPath != "context" || app.VarSpec.TypeName != "Context" {
+		return
+	}
+
+	scope := typesInfo.Scopes[funcDecl.Type]
+	obj, ok := scope.Lookup(app.VarSpec.Name).(*types.Var)
+	if !ok {
+		return
+	}
+
+	assign, ok := app.findNodeEnclosing(
+		obj.Pos(),
+		func(n ast.Node) bool { _, ok := n.(*ast.AssignStmt); return ok },
+	).(*ast.AssignStmt)
+	if !ok {
+		return
+	}
+
+	// for simplicity, only assume "<var> := context.TODO()" case.
+	if assign.Tok == token.DEFINE && len(assign.Lhs) == 1 {
+		var buf bytes.Buffer
+		err := format.Node(&buf, app.Config.Fset, assign.Rhs[0])
+		if err != nil {
+			debugf("BUG: formatting %s: %s", assign.Rhs[0], err)
+			return
+		}
+		if buf.String() == "context.TODO()" {
+			astutil.Apply(funcDecl.Body, func(c *astutil.Cursor) bool {
+				if c.Node() == assign {
+					c.Delete()
+					return false
+				}
+
+				return true
+			}, nil)
+		}
+	}
 }
 
 func (app *App) markModified(pos token.Pos) {

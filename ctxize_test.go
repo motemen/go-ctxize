@@ -93,8 +93,13 @@ func testFileContents(t *testing.T, app *App, expects map[string][]string) {
 		name := filepath.Base(filename)
 		if lines, ok := expects[name]; ok {
 			for _, line := range lines {
-				if !strings.Contains(string(content), line) {
-					t.Errorf("file %s should contain %q but got:\n%s", filename, line, string(content))
+				shouldExist := true
+				if line[0] == '!' {
+					shouldExist = false
+					line = line[1:]
+				}
+				if strings.Contains(string(content), line) != shouldExist {
+					t.Errorf("'file %s contains %q' must be %v but got:\n%s", filename, line, shouldExist, string(content))
 				}
 			}
 		}
@@ -141,4 +146,28 @@ func TestParseVarSpec(t *testing.T) {
 			t.Errorf("expected %+v but got %+v", test.expected, varSpec)
 		}
 	}
+}
+
+func TestRewrite_RemoveCtxTODO(t *testing.T) {
+	exported := packagestest.Export(t, packagestest.GOPATH, testdata)
+	defer exported.Cleanup()
+
+	app := &App{
+		Config: exported.Config,
+	}
+
+	err := app.Load("foo", "baz")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = app.Rewrite(FuncSpec{FuncName: "alreadyHasCtxInside", PkgPath: "baz"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expects := map[string][]string{
+		"baz.go": {"!context.TODO()"},
+	}
+	testFileContents(t, app, expects)
 }
