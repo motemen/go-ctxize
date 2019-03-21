@@ -2,6 +2,7 @@ package ctxize
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -18,8 +19,7 @@ import (
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
-
-	"github.com/pkg/errors"
+	"golang.org/x/xerrors"
 )
 
 // VarSpec is a specification of the variable to be prepended to the arguments
@@ -94,7 +94,7 @@ func (app *App) Load(pkgPaths ...string) (err error) {
 	app.VarSpec.pkg = varPkg
 	app.VarSpec.varTypeObj = varPkg.Types.Scope().Lookup(app.VarSpec.TypeName)
 	if app.VarSpec.varTypeObj == nil {
-		err = errors.Errorf("cannot find type %s in package %s", app.VarSpec.TypeName, varPkg.PkgPath)
+		err = xerrors.Errorf("cannot find type %s in package %s", app.VarSpec.TypeName, varPkg.PkgPath)
 	}
 
 	return
@@ -110,7 +110,7 @@ func (app *App) resolvePackage(path string) (*packages.Package, error) {
 		return nil, err
 	}
 	if len(pp) != 1 {
-		return nil, errors.Errorf("BUG: package %q resolved to multiple packages", path)
+		return nil, xerrors.Errorf("BUG: package %q resolved to multiple packages", path)
 	}
 	if len(pp[0].Errors) > 0 {
 		return nil, pp[0].Errors[0]
@@ -122,7 +122,7 @@ func (app *App) resolvePackage(path string) (*packages.Package, error) {
 		}
 	}
 
-	return nil, errors.Errorf("cannot resolve package %q", path)
+	return nil, xerrors.Errorf("cannot resolve package %q", path)
 }
 
 // Each visits all files modified along with their new contents.
@@ -272,7 +272,7 @@ func (app *App) findNodeEnclosing(pos token.Pos, pred func(ast.Node) bool) ast.N
 func (app *App) rewriteCallExpr(scope *types.Scope, pos token.Pos) (usedExisting bool, err error) {
 	callExpr, ok := app.findNodeEnclosing(pos, func(n ast.Node) (ok bool) { _, ok = n.(*ast.CallExpr); return }).(*ast.CallExpr)
 	if !ok {
-		err = errors.Errorf("BUG: %s: could not find function call expression", app.position(pos))
+		err = xerrors.Errorf("BUG: %s: could not find function call expression", app.position(pos))
 		return
 	}
 
@@ -318,7 +318,7 @@ func (app *App) ensureVar(pkg *packages.Package, scope *types.Scope, funcDecl *a
 
 	initExpr, err := parser.ParseExpr(app.VarSpec.InitExpr)
 	if err != nil {
-		return errors.Wrapf(err, "parsing %q", app.VarSpec.InitExpr)
+		return xerrors.Errorf("parsing %q: %w", app.VarSpec.InitExpr, err)
 	}
 
 	funcDecl.Body.List = append(
@@ -340,12 +340,12 @@ func (app *App) ensureVar(pkg *packages.Package, scope *types.Scope, funcDecl *a
 func (app *App) findScope(pkg *packages.Package, pos token.Pos) (*types.Scope, *ast.FuncDecl, error) {
 	decl, ok := app.findNodeEnclosing(pos, func(n ast.Node) (ok bool) { _, ok = n.(*ast.FuncDecl); return }).(*ast.FuncDecl)
 	if !ok {
-		return nil, nil, errors.Errorf("%s: BUG: no surrounding FuncDecl found", app.Config.Fset.Position(pos))
+		return nil, nil, xerrors.Errorf("%s: BUG: no surrounding FuncDecl found", app.Config.Fset.Position(pos))
 	}
 
 	scope := pkg.TypesInfo.Scopes[decl.Type]
 	if scope == nil {
-		return nil, nil, errors.Errorf("%s: BUG: no Scope found", app.Config.Fset.Position(pos))
+		return nil, nil, xerrors.Errorf("%s: BUG: no Scope found", app.Config.Fset.Position(pos))
 	}
 
 	return scope, decl, nil
@@ -394,7 +394,7 @@ func (app *App) rewriteFuncDecl(spec FuncSpec) error {
 		}
 	}
 	if funcDecl == nil {
-		return errors.Errorf("could not find declaration of func %s in package %s", spec.FuncName, spec.PkgPath)
+		return xerrors.Errorf("could not find declaration of func %s in package %s", spec.FuncName, spec.PkgPath)
 	}
 
 	debugf("%s: found definition", app.position(funcDecl.Pos()))
