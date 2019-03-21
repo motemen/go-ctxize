@@ -13,6 +13,7 @@ import (
 // goctxize [-var "ctx context.Context = context.TODO()"] path/to/pkg[.Type].Func [<pkg>...]
 func main() {
 	log.SetPrefix("goctxize: ")
+	log.SetFlags(0)
 
 	varSpecString := flag.String(
 		"var",

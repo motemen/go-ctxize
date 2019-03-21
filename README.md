@@ -32,7 +32,7 @@ Given source above, `goctxize foo.F` produces below:
     func F(ctx context.Context) {
     }
 
-While executing `goctize foo.F bar` rewrites package bar too:
+While executing `goctxize foo.F bar` rewrites package bar too:
 
     // $GOPATH/src/bar/bar.go
     package bar
