@@ -1,7 +1,7 @@
 package bar
 
 import (
-	"foo"
+	"example.com/foo"
 )
 
 func bar() {

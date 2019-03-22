@@ -2,7 +2,8 @@ package bar
 
 import (
 	"context"
-	"foo"
+
+	"example.com/foo"
 )
 
 func baz(x context.Context) {

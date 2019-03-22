@@ -9,37 +9,39 @@ import (
 	"golang.org/x/tools/go/packages/packagestest"
 )
 
-var testdata = []packagestest.Module{{
-	Name:  "foo",
-	Files: packagestest.MustCopyFileTree("testdata/gopath/src/foo"),
-}, {
-	Name:  "bar",
-	Files: packagestest.MustCopyFileTree("testdata/gopath/src/bar"),
-}, {
-	Name:  "baz",
-	Files: packagestest.MustCopyFileTree("testdata/gopath/src/baz"),
-}, {
-	Name:  "go-qux",
-	Files: packagestest.MustCopyFileTree("testdata/gopath/src/go-qux"),
-}, {
-	Name:  "go-quux",
-	Files: packagestest.MustCopyFileTree("testdata/gopath/src/go-quux"),
-}}
+var testdata = []packagestest.Module{
+	testPackage("example.com/foo"),
+	testPackage("example.com/bar"),
+	testPackage("example.com/baz"),
+	testPackage("example.com/go-qux"),
+	testPackage("example.com/go-quux"),
+}
+
+func testPackage(pkgPath string) packagestest.Module {
+	return packagestest.Module{
+		Name:  pkgPath,
+		Files: packagestest.MustCopyFileTree(filepath.Join("testdata", filepath.FromSlash(pkgPath))),
+	}
+}
 
 func TestRewrite(t *testing.T) {
-	exported := packagestest.Export(t, packagestest.GOPATH, testdata)
+	packagestest.TestAll(t, testRewrite)
+}
+
+func testRewrite(t *testing.T, exporter packagestest.Exporter) {
+	exported := packagestest.Export(t, exporter, testdata)
 	defer exported.Cleanup()
 
 	app := &App{
 		Config: exported.Config,
 	}
 
-	err := app.Load("foo", "bar", "baz")
+	err := app.Load("example.com/foo", "example.com/bar", "example.com/baz")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = app.Rewrite(FuncSpec{FuncName: "F", PkgPath: "foo"})
+	err = app.Rewrite(FuncSpec{FuncName: "F", PkgPath: "example.com/foo"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,33 +55,37 @@ func TestRewrite(t *testing.T) {
 	testFileContents(t, app, expects)
 }
 
-func TestRewriteWithVarSpec(t *testing.T) {
-	exported := packagestest.Export(t, packagestest.GOPATH, testdata)
+func TestRewrite_withVarSpec(t *testing.T) {
+	packagestest.TestAll(t, testRewrite_withVarSpec)
+}
+
+func testRewrite_withVarSpec(t *testing.T, exporter packagestest.Exporter) {
+	exported := packagestest.Export(t, exporter, testdata)
 	defer exported.Cleanup()
 
 	app := &App{
 		Config: exported.Config,
 		VarSpec: &VarSpec{
 			Name:     "t",
-			PkgPath:  "go-qux",
+			PkgPath:  "example.com/go-qux",
 			TypeName: "T",
 			InitExpr: "0",
 		},
 	}
 
-	err := app.Load("go-quux")
+	err := app.Load("example.com/go-quux")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = app.Rewrite(FuncSpec{FuncName: "F", PkgPath: "go-quux"})
+	err = app.Rewrite(FuncSpec{FuncName: "F", PkgPath: "example.com/go-quux"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	expects := map[string][]string{
 		"quux.go": {
-			`import "go-qux"`,
+			`import "example.com/go-qux"`,
 			"func F(t qux.T, n int)",
 			"t := 0",
 		},
@@ -149,19 +155,19 @@ func TestParseVarSpec(t *testing.T) {
 }
 
 func TestRewrite_RemoveCtxTODO(t *testing.T) {
-	exported := packagestest.Export(t, packagestest.GOPATH, testdata)
+	exported := packagestest.Export(t, packagestest.Modules, testdata)
 	defer exported.Cleanup()
 
 	app := &App{
 		Config: exported.Config,
 	}
 
-	err := app.Load("foo", "baz")
+	err := app.Load("example.com/foo", "example.com/baz")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = app.Rewrite(FuncSpec{FuncName: "alreadyHasCtxInside", PkgPath: "baz"})
+	err = app.Rewrite(FuncSpec{FuncName: "alreadyHasCtxInside", PkgPath: "example.com/baz"})
 	if err != nil {
 		t.Fatal(err)
 	}
