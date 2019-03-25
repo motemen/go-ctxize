@@ -131,8 +131,6 @@ func (app *App) Each(callback func(filename string, content []byte) error) error
 	for file := range app.modified {
 		filename := app.position(file.Pos()).Filename
 
-		astutil.AddImport(fset, file, app.VarSpec.pkg.PkgPath)
-
 		var buf bytes.Buffer
 		err := format.Node(&buf, fset, file)
 		if err != nil {
@@ -303,7 +301,11 @@ func (app *App) rewriteCallExpr(scope *types.Scope, pos token.Pos) (usedExisting
 		callExpr.Args...,
 	)
 
-	app.markModified(callExpr.Pos())
+	if file := app.markModified(callExpr.Pos()); file != nil {
+		if !usedExisting {
+			astutil.AddImport(app.Config.Fset, file, app.VarSpec.pkg.PkgPath)
+		}
+	}
 
 	return
 }
@@ -332,7 +334,9 @@ func (app *App) ensureVar(pkg *packages.Package, scope *types.Scope, funcDecl *a
 		funcDecl.Body.List...,
 	)
 
-	app.markModified(pos)
+	if file := app.markModified(pos); file != nil {
+		astutil.AddImport(app.Config.Fset, file, app.VarSpec.pkg.PkgPath)
+	}
 
 	return nil
 }
@@ -416,7 +420,9 @@ func (app *App) rewriteFuncDecl(spec FuncSpec) error {
 
 	app.removeStubVarDecl(spec.pkg.TypesInfo, funcDecl)
 
-	app.markModified(funcDecl.Pos())
+	if file := app.markModified(funcDecl.Pos()); file != nil {
+		astutil.AddImport(app.Config.Fset, file, app.VarSpec.pkg.PkgPath)
+	}
 
 	return nil
 }
@@ -465,7 +471,7 @@ func (app *App) removeStubVarDecl(typesInfo *types.Info, funcDecl *ast.FuncDecl)
 	}
 }
 
-func (app *App) markModified(pos token.Pos) {
+func (app *App) markModified(pos token.Pos) *ast.File {
 	for _, pkg := range app.pkgs {
 		for _, file := range pkg.Syntax {
 			if file.Pos() == token.NoPos {
@@ -474,12 +480,14 @@ func (app *App) markModified(pos token.Pos) {
 			f := app.Config.Fset.File(file.Pos())
 			if f.Base() <= int(pos) && int(pos) < f.Base()+f.Size() {
 				app.modified[file] = true
-				return
+				return file
 			}
 		}
 	}
 
-	debugf("markModified: not found: %s", app.position(pos).Filename)
+	debugf("BUG: markModified: not found: %s", app.position(pos).Filename)
+
+	return nil
 }
 
 var Debug, _ = strconv.ParseBool(os.Getenv("GOCTXIZEDEBUG"))

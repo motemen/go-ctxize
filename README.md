@@ -9,22 +9,35 @@ with callers of the function rewritten so.
 
 For example:
 
-    // $GOPATH/src/foo/foo.go
+    // $GOPATH/src/example.com/foo/foo.go
     package foo
 
     func F() {
     }
 
-    // $GOPATH/src/bar/bar.go
+    // $GOPATH/src/example.com/foo/foo_test.go
+    package foo
+
+    import "testing"
+
+    func TestF(t *testing.T) {
+        F()
+    }
+
+    // $GOPATH/src/example.com/bar/bar.go
     package bar
+
+    import (
+        "example.com/foo"
+    )
 
     func bar() {
         foo.F()
     }
 
-Given source above, `goctxize foo.F` produces below:
+Given source above, `goctxize example.com/foo.F` produces below:
 
-    // $GOPATH/src/foo/foo.go
+    // $GOPATH/src/example.com/foo/foo.go
     package foo
 
     import "context"
@@ -32,14 +45,28 @@ Given source above, `goctxize foo.F` produces below:
     func F(ctx context.Context) {
     }
 
-While executing `goctxize foo.F bar` rewrites package bar too:
+    // $GOPATH/src/example.com/foo/foo_test.go
+    package foo
 
-    // $GOPATH/src/bar/bar.go
+    import (
+        "context"
+        "testing"
+    )
+
+    func TestF(t *testing.T) {
+        ctx := context.TODO()
+
+        F(ctx)
+    }
+
+While executing `goctxize example.com/foo.F example.com/bar` rewrites package bar too:
+
+    // $GOPATH/src/example.com/bar/bar.go
     package bar
 
     import (
         "context"
-        "foo"
+        "example.com/foo"
     )
 
     func bar() {
